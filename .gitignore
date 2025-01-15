@@ -171,8 +171,11 @@ cython_debug/
 .pypirc
 
 
-#tmp directories and files
+# tmp directories and files
 tmp/
 */tmp/
 *#
 .*
+
+# Data files
+*.pickle
