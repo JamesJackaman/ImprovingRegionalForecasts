@@ -1,0 +1,13 @@
+{
+    "creators": [
+        {
+            "affiliation": "NTNU",
+            "name": "Jackaman, James",
+            "orcid": "0000-0003-2189-9732"
+        }
+    ],
+    "description": "Code used to generate experiments in `Improving regional weather forecasts with neural interpolation' by Jackaman and Sutton.",
+    "license": "MIT",
+    "title": "Implementation of `Improving regional weather forecasts with neural interpolation'",
+    "upload_type": "software"
+}
