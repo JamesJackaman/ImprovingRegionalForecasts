@@ -4,7 +4,6 @@ import numpy as np
 import matplotlib
 import copy
 import matplotlib.pylab as plt
-import neptune
 
 #local imports
 import dataset
