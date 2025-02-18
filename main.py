@@ -214,7 +214,7 @@ def train(model,trainloader,sp):
 
     print('Training finished')
 
-    torch.save(model.state_dict(),"models/learn_flow.pt")
+    torch.save(model.state_dict(),"learn_flow.pt")
 
     print('Model saved')
     
@@ -246,7 +246,7 @@ def model_run(sp):
     train(model,trainloader,sp)
 
     #Load model
-    model.load_state_dict(torch.load("models/learn_flow.pt"))
+    model.load_state_dict(torch.load("learn_flow.pt"))
 
     #Move mass and energy off device
     mass = np.array(detach(sp.mass))
