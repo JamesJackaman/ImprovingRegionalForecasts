@@ -1,9 +1,7 @@
 #global imports
 import torch
 import numpy as np
-import matplotlib
 import copy
-import matplotlib.pylab as plt
 
 #local imports
 import dataset

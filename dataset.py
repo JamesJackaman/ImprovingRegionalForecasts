@@ -4,7 +4,6 @@ import numpy as np
 import scipy.sparse as sps
 import pickle
 import copy
-import matplotlib.pylab as plt
 
 #Check (core) data is downloaded, and if not download it
 import getData
