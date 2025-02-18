@@ -6,10 +6,10 @@ The data used here is generated via a finite element discretisation using [Fired
 
 ## Installation
 
-This repository depends on [Python 3](https://www.python.org/downloads/) (v3.11.6), [PyTorch](https://pytorch.org) (v2.1.2), [NumPy](https://numpy.org) (v1.24.0) and [SciPy](https://scipy.org) (v1.11.4). The recommended installation procedure is to create a Python 3 virtual environment and pip install all packages, fixing the version number. For example, to install NumPy
+This repository depends on [Python 3](https://www.python.org/downloads/) (v3.11.6), [PyTorch](https://pytorch.org) (v2.1.2), [NumPy](https://numpy.org) (v1.24.0) and [SciPy](https://scipy.org) (v1.11.4). The recommended installation procedure is to create a Python 3.11(.6) virtual environment and pip install the requirements with
 
 ```cmd
-pip install numpy==1.24.0
+pip3 install -r requirements.txt
 ```
 
 To generate data, one must install Firedrake. Up-to-date installation instructions can be found [here](https://www.firedrakeproject.org/download.html). 
