@@ -22,6 +22,20 @@ To generate data, one must install Firedrake. Up-to-date installation instructio
 
 `getData.py`: Checks if the dataset exists locally and downloads it if it doesn't. This process can be slow, so downloading immediately is recommended. This is run automatically by `dataset.py`. 
 
+## Get started (tl;dr)
+
+### Step 1 
+
+Download the data by running `python3 getData.py` (or downloading the data from [https://doi.org/10.5281/zenodo.14803077](https://doi.org/10.5281/zenodo.14803077)).
+
+### Step 2
+
+Install `torch`, `numpy` and `scipy` in a Python3 virtual environment.
+
+### Step 3
+
+Run `main.py` to replicate the results presented in the paper.
+
 ## Data generation
 
 `swe.py`: Generates one simulation of the shallow water equations in 1D with random parameters initialised from the `generator` class. The simulation runs over both a coarse and fine spatial grid. The coarse solution is interpolated onto the finer grid, so the data sizes are the same. One should modify the `generator` class in this file to change the randomised initial data.
