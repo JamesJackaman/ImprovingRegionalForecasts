@@ -98,9 +98,9 @@ class network(nn.Module):
         u, v, p = x        
 
         #Interpolate
-        u = self.cnn_u(u)
-        v = self.cnn_v(v)
-        p = self.cnn_p(p)
+        u = self.cnn_u(u) + u
+        v = self.cnn_v(v) + v
+        p = self.cnn_p(p) + p
 
         #Dynamic step
         udim = u.shape[2]
@@ -109,13 +109,13 @@ class network(nn.Module):
         z = torch.cat((u,v,p),2)
 
         for i in range(self.para.stacksize-1):
-            rhs = torch.einsum('ij,bj -> bj', self.para.Ainv @ self.para.B, z[:,i,:])
+            rhs = torch.einsum('ij,bj -> bi', self.para.Ainv @ self.para.B, z[:,i,:])
             rhs = rhs.unsqueeze(1)
             z[:,i+1,:] = rhs.squeeze(1)
             
         #Resplit data
         u = u + self.cnn_u_(z[:,:,:udim])
-        v = v + self.cnn_v_(z[:,:,udim+1:udim+vdim+1])
+        v = v + self.cnn_v_(z[:,:,udim:udim+vdim])
         p = p + self.cnn_p_(z[:,:,udim+vdim:])
 
         return u, v, p
