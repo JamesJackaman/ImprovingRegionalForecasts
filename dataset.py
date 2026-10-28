@@ -34,6 +34,22 @@ class dataset(Dataset):
     def __len__(self):
         return self.length
 
+def align_operators(A,B,z,tol=1e-8):
+    n = z.shape[1]//3
+    best = np.inf
+    for shift in [-1,0,1]:
+        perm = np.concatenate((np.arange(2*n), 2*n + np.roll(np.arange(n),shift)))
+        A_s = A[perm,:][:,perm]
+        B_s = B[perm,:][:,perm]
+        res = (np.linalg.norm(A_s @ z[1:].T - B_s @ z[:-1].T)
+               / np.linalg.norm(B_s @ z[:-1].T))
+        if res < best:
+            best, A_best, B_best = res, A_s, B_s
+    if best > tol:
+        raise ValueError('A and B do not match the dynamics of the data ' +
+                         '(relative residual %.2e)' % best)
+    return A_best, B_best
+
 def all_data(stacksize=-1,device='cpu'):
     with open('data_swe.pickle','rb') as file:
         data = pickle.load(file)
@@ -49,6 +65,9 @@ def all_data(stacksize=-1,device='cpu'):
         B = data['B']
         invariant = {'mass': data['mass'],
                      'energy': data['energy']}
+
+    #Align A and B with the data ordering (checked on one fine simulation)
+    A, B = align_operators(A,B,np.concatenate((u_out[0],v_out[0],p_out[0]),1))
 
     #Stack all simulations
     if stacksize==-1:
@@ -69,7 +88,7 @@ def all_data(stacksize=-1,device='cpu'):
     train_in = u_in[:split,:], v_in[:split,:], p_in[:split,:]
     train_out = u_out[:split,:], v_out[:split,:], p_out[:split,:]
     test_in = u_in[split+1:,:], v_in[split+1:,:], p_in[split+1:,:]
-    test_out = u_in[split+1:,:], v_out[split+1:,:], p_out[split+1:,:]
+    test_out = u_out[split+1:,:], v_out[split+1:,:], p_out[split+1:,:]
 
     #Shove in torch.Dataset class
     trainset = dataset(train_in,train_out,A=A,B=B,invariant=invariant,device=device)
