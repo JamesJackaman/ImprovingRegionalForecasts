@@ -2,6 +2,8 @@
 import torch
 import numpy as np
 import copy
+import os
+import argparse
 
 #local imports
 import dataset
@@ -18,23 +20,22 @@ else:
     device_name = 'cpu'
 device = torch.device(device_name)
 
-#Fix seed
-torch.manual_seed(7)
-
 #Default parameters (LIKELY NOT BEING USED)
 class default_parameters:
     def __init__(self):
         #Training parameters
-        self.lr = 1e-3
+        self.lr = 1e-3 #peak learning rate
         self.epochs=200
         self.batch_size = 16
-        self.step_size = 30
-        self.gamma = 0.1
-        self.tol = 1e-6 #convergence tol
+        self.warmup = 5 #epochs of learning rate warm-up
+        self.seed = 7
         
         #Network parameters
+        self.variant = 'flow' #or 'noflow' (without the flow map) or 'unet' (UNet alone)
+        self.layers = None #or the number of convolutions in a smaller UNet
         self.size1 = 2**3
         self.size2 = 2**4
+        self.operator = 'fine' #fine flow map, or the controls 'identity' or 'random'
 
         #Data parameters
         self.stacksize = 10
@@ -50,6 +51,17 @@ def detach(x):
         y.append(x[i].cpu().detach().numpy())
     return y
         
+#Apply a CNN to data scaled to be of order one
+class scaled(nn.Module):
+    def __init__(self,cnn,s_in,s_out):
+        super().__init__()
+        self.cnn = cnn
+        self.s_in = s_in
+        self.s_out = s_out
+
+    def forward(self,x):
+        return self.s_out * self.cnn(x / self.s_in)
+
 #Define network
 class network(nn.Module):
     def __init__(self,para):
@@ -60,34 +72,57 @@ class network(nn.Module):
         size1 = para.size1 * ss
         size2 = para.size2 * ss
         bias_switch = True
-        self.layer1 = nn.Conv1d(ss,size1,kernel_size=3,padding=1,
-                                stride=1,bias=bias_switch,padding_mode='circular')
-        self.layer2 = nn.Conv1d(size1,size2,kernel_size=5,padding=2,
-                                stride=1,bias=bias_switch,padding_mode='circular')
-        self.layer3 = nn.Conv1d(size2,size2,kernel_size=7,padding=3,
-                                stride=1,bias=bias_switch,padding_mode='circular')
-        self.layer4 = nn.Conv1d(size2,size1,kernel_size=5,padding=2,
-                                stride=1,bias=bias_switch,padding_mode='circular')
-        self.layer5 = nn.Conv1d(size1,ss,kernel_size=3,padding=1,
-                                stride=1,bias=bias_switch,padding_mode='circular')
+        if para.layers is None:
+            self.layer1 = nn.Conv1d(ss,size1,kernel_size=3,padding=1,
+                                    stride=1,bias=bias_switch,padding_mode='circular')
+            self.layer2 = nn.Conv1d(size1,size2,kernel_size=5,padding=2,
+                                    stride=1,bias=bias_switch,padding_mode='circular')
+            self.layer3 = nn.Conv1d(size2,size2,kernel_size=7,padding=3,
+                                    stride=1,bias=bias_switch,padding_mode='circular')
+            self.layer4 = nn.Conv1d(size2,size1,kernel_size=5,padding=2,
+                                    stride=1,bias=bias_switch,padding_mode='circular')
+            self.layer5 = nn.Conv1d(size1,ss,kernel_size=3,padding=1,
+                                    stride=1,bias=bias_switch,padding_mode='circular')
 
-        self.cnn_u = nn.Sequential(
-            self.layer1,
-            nn.ReLU(),
-            self.layer2,
-            nn.ReLU(),
-            self.layer3,
-            nn.ReLU(),
-            self.layer4,
-            nn.ReLU(),
-            self.layer5,
-        )
+            self.cnn_u = nn.Sequential(
+                self.layer1,
+                nn.ReLU(),
+                self.layer2,
+                nn.ReLU(),
+                self.layer3,
+                nn.ReLU(),
+                self.layer4,
+                nn.ReLU(),
+                self.layer5,
+            )
+        else:
+            #Smaller UNet: L convolutions of kernel size 3 with size1 hidden channels
+            channels = [ss] + [size1]*(para.layers-1) + [ss]
+            layer_list = []
+            for i in range(para.layers):
+                if i > 0:
+                    layer_list.append(nn.ReLU())
+                conv = nn.Conv1d(channels[i],channels[i+1],kernel_size=3,padding=1,
+                                 stride=1,bias=bias_switch,padding_mode='circular')
+                layer_list.append(conv)
+            self.cnn_u = nn.Sequential(*layer_list)
         self.cnn_v = copy.deepcopy(self.cnn_u)
         self.cnn_p = copy.deepcopy(self.cnn_u)
 
-        self.cnn_u_ = copy.deepcopy(self.cnn_u)
-        self.cnn_v_ = copy.deepcopy(self.cnn_u)
-        self.cnn_p_ = copy.deepcopy(self.cnn_u)
+        #UNet alone has no UNet2
+        if para.variant!='unet':
+            self.cnn_u_ = copy.deepcopy(self.cnn_u)
+            self.cnn_v_ = copy.deepcopy(self.cnn_u)
+            self.cnn_p_ = copy.deepcopy(self.cnn_u)
+
+        #Scale each component
+        self.cnn_u = scaled(self.cnn_u,*para.scales['u'])
+        self.cnn_v = scaled(self.cnn_v,*para.scales['v'])
+        self.cnn_p = scaled(self.cnn_p,*para.scales['p'])
+        if para.variant!='unet':
+            self.cnn_u_ = scaled(self.cnn_u_,*para.scales['u'])
+            self.cnn_v_ = scaled(self.cnn_v_,*para.scales['v'])
+            self.cnn_p_ = scaled(self.cnn_p_,*para.scales['p'])
 
         
     def index(self,func,i):
@@ -102,16 +137,21 @@ class network(nn.Module):
         v = self.cnn_v(v) + v
         p = self.cnn_p(p) + p
 
+        #UNet alone
+        if self.para.variant=='unet':
+            return u, v, p
+
         #Dynamic step
         udim = u.shape[2]
         vdim = v.shape[2]
         pdim = p.shape[2]
         z = torch.cat((u,v,p),2)
 
-        for i in range(self.para.stacksize-1):
-            rhs = torch.einsum('ij,bj -> bi', self.para.Ainv @ self.para.B, z[:,i,:])
-            rhs = rhs.unsqueeze(1)
-            z[:,i+1,:] = rhs.squeeze(1)
+        if self.para.variant=='flow':
+            for i in range(self.para.stacksize-1):
+                rhs = torch.einsum('ij,bj -> bi', self.para.Ainv @ self.para.B, z[:,i,:])
+                rhs = rhs.unsqueeze(1)
+                z[:,i+1,:] = rhs.squeeze(1)
             
         #Resplit data
         u = u + self.cnn_u_(z[:,:,:udim])
@@ -164,15 +204,20 @@ def train(model,trainloader,sp):
 
     # Choose optimiser
     optimiser = torch.optim.Adam(model.parameters(),lr=sp.lr,weight_decay=0)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimiser,
-                                                step_size=sp.step_size,gamma=sp.gamma)
+    # Choose learning rate scheduler (linear warm-up, then cosine decay)
+    steps = sp.epochs * len(trainloader)
+    warmup = sp.warmup * len(trainloader)
+    def schedule(step):
+        if step < warmup:
+            return (step+1) / warmup
+        return 0.5 * (1 + np.cos(np.pi * (step-warmup) / (steps-warmup)))
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimiser,schedule)
     
-    lossVal = 1
     epoch = 0
         
     #Loop over epochs
     count = 0
-    while epoch < sp.epochs and lossVal > sp.tol:
+    while epoch < sp.epochs:
         epoch+=1
         running_loss = 0
         for i, data in enumerate(trainloader):
@@ -198,8 +243,9 @@ def train(model,trainloader,sp):
             else:
                 loss = criterion(outputs,labels) #Define loss
         
-            loss.backward() #Backpropagation
+            (loss / sp.ref).backward() #Backpropagation
             optimiser.step() #Optimise
+            scheduler.step() #Learning rate scheduler
 
             running_loss += loss.item()
 
@@ -209,12 +255,9 @@ def train(model,trainloader,sp):
                 print(f'Loss [{epoch}, {i}](epoch, minibatch): ', running_loss / 20)
                 running_loss = 0.0
 
-        lossVal = loss.item()
-        scheduler.step() #Learning rate scheduler
-
     print('Training finished')
 
-    torch.save(model.state_dict(),"learn_flow.pt")
+    torch.save(model.state_dict(),sp.name+'.pt')
 
     print('Model saved')
     
@@ -222,6 +265,26 @@ def train(model,trainloader,sp):
 
 
 def model_run(sp):
+    #Name the run (as in plot.py)
+    sigma = 0
+    if sp.conserve:
+        sigma = sp.sigma
+    sp.name = 'results/%s_sigma%g_seed%d' % (sp.variant,sigma,sp.seed)
+    if sp.layers is not None:
+        sp.name += '_L%d' % sp.layers
+    if (sp.size1,sp.size2)!=(2**3,2**6):
+        sp.name += '_size%d-%d' % (sp.size1,sp.size2)
+    if sp.operator!='fine':
+        sp.name += '_' + sp.operator
+    #Skip finished runs
+    if os.path.isfile(sp.name+'.npz'):
+        print(sp.name, 'has already finished')
+        return
+    os.makedirs('results',exist_ok=True)
+
+    #Fix seed
+    torch.manual_seed(sp.seed)
+
     #Split data into test and training
     trainset, testset = dataset.all_data(device=device,stacksize=sp.stacksize)
     #Get the mass matrix and put on GPU (for custom loss function)
@@ -232,61 +295,76 @@ def model_run(sp):
     sp.Ainv = trainset.Ainv
     sp.B = trainset.B
 
+    #Standard deviation of the coarse data, and of its difference from the fine data
+    sp.scales = {}
+    sp.scales['u'] = (trainset.u_in.std().item(),(trainset.u_out-trainset.u_in).std().item())
+    sp.scales['v'] = (trainset.v_in.std().item(),(trainset.v_out-trainset.v_in).std().item())
+    sp.scales['p'] = (trainset.p_in.std().item(),(trainset.p_out-trainset.p_in).std().item())
+
+    #Controls: the identity or S Q S^-1 (Q random orthogonal, S the scales) as the flow map
+    if sp.operator=='identity':
+        sp.Ainv = torch.eye(len(sp.B)).to(device)
+        sp.B = torch.eye(len(sp.B)).to(device)
+    elif sp.operator=='random':
+        s = np.concatenate((np.full(trainset.u_in.shape[2],sp.scales['u'][0]),
+                            np.full(trainset.v_in.shape[2],sp.scales['v'][0]),
+                            np.full(trainset.p_in.shape[2],sp.scales['p'][0])))
+        Q, R = np.linalg.qr(np.random.default_rng(0).standard_normal((len(s),len(s))))
+        Q = Q * np.sign(np.diag(R)) #uniformly distributed over the orthogonal matrices
+        sp.Ainv = torch.eye(len(s)).to(device)
+        sp.B = torch.from_numpy(s[:,None] * Q / s[None,:]).float().to(device)
+
+    #Mass and energy in double precision (off device)
+    mass = trainset.invariant['mass'].toarray()
+    energy = trainset.invariant['energy'].toarray()
+
+    #Normalise the loss by the average squared L2 error of the coarse training data
+    coarse = torch.cat((trainset.u_in,trainset.v_in,trainset.p_in),2).cpu().double().numpy()
+    fine = torch.cat((trainset.u_out,trainset.v_out,trainset.p_out),2).cpu().double().numpy()
+    L2 = np.einsum('bsn, nm, bsm -> bs', coarse-fine, mass, coarse-fine, optimize=True)
+    sp.ref = float(np.mean(L2))
+
     #Initialise network
     model = network(sp)
     model.to(device)
+    params = sum(q.numel() for q in model.parameters())
+    print('Parameters =', params)
 
-    #Batch and shuffle data
+    #Batch data and shuffle the training data
     trainloader = torch.utils.data.DataLoader(trainset,batch_size=sp.batch_size,
                                               shuffle=True,num_workers=0)
     testloader = torch.utils.data.DataLoader(testset,batch_size=sp.batch_size,
-                                             shuffle=True,num_workers=0)
+                                             shuffle=False,num_workers=0)
 
     #Train network
     train(model,trainloader,sp)
 
-    #Load model
-    model.load_state_dict(torch.load("learn_flow.pt"))
+    #Run model on all validation data
+    X, Y, Z = [], [], []
+    with torch.no_grad():
+        for inputs, labels in testloader:
+            X.append(torch.cat(inputs,2).cpu().double().numpy()) #input
+            Y.append(torch.cat(labels,2).cpu().double().numpy()) #truth
+            Z.append(torch.cat(model(inputs),2).cpu().double().numpy()) #output
+    X, Y, Z = np.concatenate(X), np.concatenate(Y), np.concatenate(Z)
 
-    #Move mass and energy off device
-    mass = np.array(detach(sp.mass))
-    energy = np.array(detach(sp.energy))
+    #Compute squared L2 errors and norm for each run and time level
+    L2err = np.einsum('bsn, nm, bsm -> bs', Z-Y, mass, Z-Y, optimize=True)
+    L2coarse = np.einsum('bsn, nm, bsm -> bs', X-Y, mass, X-Y, optimize=True)
+    L2norm = np.einsum('bsn, nm, bsm -> bs', Y, mass, Y, optimize=True)
 
-    for i in range(10):
-        X, Y = next(iter(testloader))
+    #Compute relative deviation from the initial energy
+    Energy = np.einsum('bsn, nm, bsm -> bs', Z, energy, Z, optimize=True)
+    Energy0 = np.einsum('bn, nm, bm -> b', X[:,0], energy, X[:,0], optimize=True)
+    dEnergy = np.abs(Energy - Energy0[:,None]) / Energy0[:,None]
 
-        Z = model(X)
+    print('L2err =', np.mean(L2err))
+    print('L2coarse =', np.mean(L2coarse))
+    print('dEnergy =', np.mean(dEnergy))
 
-        U_, V_, P_ = detach(X) #input
-        U_true, V_true, P_true = detach(Y) #truth
-        U, V, P = detach(Z) #output
-
-        U_err, V_err, P_err = (U-U_true), (V-V_true), (P-P_true)
-
-        #Combine
-        z = np.concatenate((U_err, V_err, P_err),2)
-        
-        #Compute L2 error
-        L2err = np.mean(np.einsum('bsn, nm, bsm -> bs', z, mass, z),axis=0)
-        print('L2err =', L2err)
-        
-        #Compute MSE errors
-        mse = (np.mean(U_err**2, axis=(0,2))
-               + np.mean(V_err**2, axis=(0,2))
-               + np.mean(P_err**2, axis=(0,2)))/3
-        print('MSE =', mse)
-
-        #Compute deviation in invariants
-        Mass = np.mean(np.einsum('n, nm, bsm -> bs', np.ones_like(z[0,0,:]), mass, z),
-                       axis=0)
-        Energy = np.mean(np.einsum('bsn, nm, bsm -> bs', z, energy, z),
-                         axis=0)
-
-        print('Mass', Mass)
-        print('Energy', Energy)
-
-        dMass = np.abs(np.ones_like(Mass)*Mass[0] - Mass[:])
-        dEnergy = np.abs(np.ones_like(Energy)*Energy[0] - Energy[:])    
+    #Save results (for plot.py)
+    np.savez(sp.name+'.npz',L2err=L2err,L2coarse=L2coarse,L2norm=L2norm,dEnergy=dEnergy,
+             params=params)
 
 
 if __name__=="__main__":
@@ -295,41 +373,64 @@ if __name__=="__main__":
 
     # input('test run finished')
     
-    for conserve in [False,True]:
-        if conserve==True:
-            sigmas = [0.1,1,10]
-        else:
-            sigmas = [-1]
-        for sigma in sigmas:
-            for size1 in [2**3]:
-                for size2 in [2**6]:
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--seeds', type=int, nargs='+', default=[1,2,7],
+                        help = 'Seeds to run (to split the runs between processes)')
+    args = parser.parse_args()
 
-                    print('Now running conserve=%s with sigma=%s' % (conserve,sigma))
+    #Experiments as (variant, sigma, layers, size1, operator)
+    experiments = []
+    #Table 1
+    for sigma in [0,0.1,1,10]:
+        experiments.append(('flow',sigma,None,2**3,'fine'))
+    #Figure 3
+    for layers in [2,3,4,5,None]:
+        for variant in ['flow','noflow','unet']:
+            experiments.append((variant,0,layers,2**3,'fine'))
+    #Appendix B: wider networks
+    for layers in [2,3]:
+        for variant in ['flow','noflow']:
+            experiments.append((variant,0,layers,2**5,'fine'))
+    #Appendix B: UNet alone with about as many parameters as the network with the flow map
+    experiments.append(('unet',0,2,2**4,'fine'))
+    experiments.append(('unet',0,3,12,'fine'))
+    #Appendix B: the flow map replaced by the identity or a random map
+    for layers in [2,3]:
+        for operator in ['identity','random']:
+            experiments.append(('flow',0,layers,2**3,operator))
+
+    for seed in args.seeds:
+        for variant, sigma, layers, size1, operator in experiments:
+
+            print('Now running %s with sigma=%s, layers=%s, size1=%s, operator=%s, seed=%s'
+                  % (variant,sigma,layers,size1,operator,seed))
                     
-                    #Initialise parameters
-                    class super_parameters:
-                        def __init__(self):
+            #Initialise parameters
+            class super_parameters:
+                def __init__(self):
 
-                            #Training parameters
-                            self.lr = 1e-3
-                            self.epochs=300
-                            self.batch_size = 16
-                            self.step_size = 30
-                            self.gamma = 0.1
-                            self.tol = 1e-6 #convergence tol
-                            self.noise = 1e-12
+                    #Training parameters
+                    self.lr = 1e-3 #peak learning rate
+                    self.epochs=300
+                    self.batch_size = 16
+                    self.warmup = 5 #epochs of learning rate warm-up
+                    self.noise = 1e-12
+                    self.seed = seed
 
-                            #Network parameters
-                            self.size1 = size1
-                            self.size2 = size2
+                    #Network parameters
+                    self.variant = variant
+                    self.layers = layers
+                    self.size1 = size1
+                    self.size2 = 2**6
+                    self.operator = operator
 
-                            #Data parameters
-                            self.stacksize = 10
+                    #Data parameters
+                    self.stacksize = 10
 
-                            #Conserve stuff?
-                            self.conserve = conserve
-                            self.sigma = sigma #Level of energy regularisation
+                    #Conserve stuff?
+                    self.conserve = sigma > 0
+                    self.sigma = sigma #Level of energy regularisation
 
-                    #Run model
-                    sp = super_parameters()
-                    model_run(sp)
+            #Run model
+            sp = super_parameters()
+            model_run(sp)
