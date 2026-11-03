@@ -179,3 +179,6 @@ tmp/
 
 # Data files
 *.pickle
+
+# Results
+results/
